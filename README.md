@@ -4,6 +4,16 @@
 
 Welcome to "BattProDeep" – a specialized repository dedicated to advancing the prediction of lithium-ion battery aging through sophisticated probabilistic prediction models.
 
+## Preprint Version
+
+This tool has been accepted to be presented at the [**NEIS 2024**](https://neis-conference.com/) conference.  Considering this, the preprint version of the paper explaining this tool is available [here](https://doi.org/10.26434/chemrxiv-2024-5bh40).
+
+If you want to use this tool in your academic work, please cite it as follows:
+
+```plaintext
+Heidarabadi H, Graner M, Hesse H. BattProDeep: A Deep Learning-Based Tool for Probabilistic Battery Aging Prediction. ChemRxiv. 2024; doi:10.26434/chemrxiv-2024-5bh40
+```
+
 ## Key Features:
 
 * **Innovative Modeling**: Utilizing cutting-edge machine learning techniques to accurately model and forecast the aging process of lithium-ion batteries.
