@@ -2,7 +2,17 @@
 
 ## Description:
 
+<p align="center">
+  <img src="./docs/figures/00_overall.png" alt="overall" width="600"/>
+</p>
+
 Welcome to "BattProDeep" – a specialized repository dedicated to advancing the prediction of lithium-ion battery aging through sophisticated probabilistic prediction models.
+
+The following figure displays the details of BattProDeep:
+
+<p align="center">
+  <img src="./docs/figures/01_detailed_overview.png" alt="overall" width="1000"/>
+</p>
 
 ## Preprint Version
 
