@@ -16,7 +16,7 @@ The following figure displays the details of BattProDeep:
 
 ## Preprint Version
 
-This tool has been accepted to be presented at the [**NEIS 2024**](https://neis-conference.com/) conference.  Considering this, the preprint version of the paper explaining this tool is available [here](https://doi.org/10.26434/chemrxiv-2024-5bh40).
+This tool has been accepted to be presented at the [**NEIS 2024**](https://neis-conference.com/) conference.  Considering this, the preprint version of the paper explaining this tool is available [here](https://doi.org/10.26434/chemrxiv-2024-5bh40-v2).
 
 If you want to use this tool in your academic work, please cite it as follows:
 
