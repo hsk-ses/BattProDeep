@@ -23,7 +23,7 @@ If you want to use this tool in your academic work, please cite it as follows:
 ```plaintext
 Heidarabadi H, Graner M, Hesse H. BattProDeep: A Deep Learning-Based Tool for Probabilistic Battery Aging Prediction. ChemRxiv. 2024; doi:10.26434/chemrxiv-2024-5bh40
 ```
-
+The requirements.txt file helps you to install all dependencies. make sure to use Python 3.10 for your envirionment.
 ## Key Features:
 
 * **Innovative Modeling**: Utilizing cutting-edge machine learning techniques to accurately model and forecast the aging process of lithium-ion batteries.
