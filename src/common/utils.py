@@ -9,6 +9,7 @@ import shutil
 import zipfile
 import tempfile
 import random
+import threading
 from datetime import datetime
 
 from pandas import DataFrame
@@ -27,6 +28,32 @@ sns.reset_defaults()
 # sns.set_style('whitegrid')
 # sns.set_context('talk')
 sns.set_context(context='talk', font_scale=0.7)
+
+_TF_MODEL_LOAD_LOCK = threading.Lock()
+_SCALER_CACHE = {}
+
+
+def _load_latest_scaler(path: str, identifier: str):
+    """Load and cache the newest scaler for repeated simulation-time scaling."""
+    path_abs = os.path.abspath(path)
+    cache_key = (path_abs, identifier)
+    dir_mtime = os.stat(path_abs).st_mtime_ns
+    cached = _SCALER_CACHE.get(cache_key)
+    if cached is not None:
+        cached_mtime, _, cached_scaler = cached
+        if cached_mtime == dir_mtime:
+            return cached_scaler
+
+    scaler_files = sorted(
+        [f for f in os.listdir(path_abs) if f.startswith(f'scalar_{identifier}')],
+        reverse=True,
+    )
+    if not scaler_files:
+        raise FileNotFoundError(f"No scaler file starting with scalar_{identifier} in {path_abs}")
+    scaler_file = os.path.join(path_abs, scaler_files[0])
+    loaded_scaler = joblib.load(scaler_file)
+    _SCALER_CACHE[cache_key] = (dir_mtime, scaler_file, loaded_scaler)
+    return loaded_scaler
 
 
 def calculate_soc_profile(current_profile: np.ndarray, initial_soc: float, battery_capacity: float) -> np.ndarray:
@@ -533,7 +560,7 @@ def plot_calendar_dynamic_loss_with_confidence_intervals(
     fig.show()
 
 
-def load_latest_model(model_dir: str, custom_objects: Dict[str, Any] = None) -> Optional[Any]:
+def load_latest_model(model_dir: str, custom_objects: Dict[str, Any] = None,load_epistemic: bool = False) -> Optional[Any]:
     """
     Loads the most recent TensorFlow model from a directory containing
     model files named with a 'model_' prefix. The models are assumed to
@@ -551,19 +578,75 @@ def load_latest_model(model_dir: str, custom_objects: Dict[str, Any] = None) -> 
         FileNotFoundError: If no model files with the 'model_' prefix are found
                            in the specified directory.
     """
-    model_files = os.listdir(model_dir)
-    model_files = sorted([f for f in model_files if f.startswith('model_')], reverse=True)
+    content = os.listdir(model_dir)
 
-    if model_files:
-        # Path to the most recent model file
-        model_pb_al_file = os.path.join(model_dir, model_files[0])
-        # Load the most recent model
-        model_pb_al = load_tf_model_from_zip(model_pb_al_file, custom_objects=custom_objects)
-        print(f"Loaded model from: {model_pb_al_file}")
-        return model_pb_al
-    else:
-        print("No model files found in the directory.")
-        return None
+    def _timestamp_from_name(name: str) -> Optional[datetime]:
+        match = re.search(r"(\d{8}_\d{6})", name)
+        if not match:
+            return None
+        try:
+            return datetime.strptime(match.group(1), "%Y%m%d_%H%M%S")
+        except ValueError:
+            return None
+
+    def _latest_by_embedded_timestamp(candidates: List[str]) -> List[str]:
+        dated = [(item, _timestamp_from_name(item)) for item in candidates]
+        dated_only = [(item, ts) for item, ts in dated if ts is not None]
+        if dated_only:
+            dated_only.sort(key=lambda x: (x[1], x[0]), reverse=True)
+            return [item for item, _ in dated_only]
+        return sorted(candidates, reverse=True)
+
+    # ---------------------------
+    # CASE 1: epistemic ensemble
+    # ---------------------------
+    if load_epistemic:
+        zip_files = _latest_by_embedded_timestamp(
+            [f for f in content if f.lower().endswith(".zip")]
+        )
+        if zip_files:
+            latest_path = model_dir
+        else:
+            folders = _latest_by_embedded_timestamp(
+                [f for f in content if os.path.isdir(os.path.join(model_dir, f))]
+            )
+
+            if not folders:
+                raise ValueError(f"No bootstrap folders or model zip files in {model_dir}")
+
+            latest_path = os.path.join(model_dir, folders[0])
+            zip_files = _latest_by_embedded_timestamp(
+                [f for f in os.listdir(latest_path) if f.lower().endswith(".zip")]
+            )
+
+        models = []
+        for file in zip_files:
+            path = os.path.join(latest_path, file)
+            model = load_tf_model_from_zip(path, custom_objects=custom_objects)
+            models.append(model)
+
+        if not models:
+            raise ValueError(f"No model zip files in {latest_path}")
+        
+
+        print(f"Loaded {len(models)} bootstrap models from {latest_path}")
+        return models
+
+    # ---------------------------
+    # CASE 2: single model
+    # ---------------------------
+    model_files = _latest_by_embedded_timestamp(
+        [f for f in content if f.startswith("model_")]
+    )
+
+    if not model_files:
+        raise ValueError(f"No model files found in {model_dir}")
+
+    model_path = os.path.join(model_dir, model_files[0])
+    model = load_tf_model_from_zip(model_path, custom_objects=custom_objects)
+
+    print(f"Loaded model from: {model_path}")
+    return model
 
 
 def augment_list(original_list: List[float], target_length: int) -> List[float]:
@@ -1117,14 +1200,17 @@ def scale_data(scaler: MinMaxScaler, sequences: np.ndarray, path: str, is_label:
         identifier = 'virtual' if is_inverse else 'q_loss'
 
     if val_test_flag:
-        scaler_files = os.listdir(path)
-        scaler_files = sorted([f for f in scaler_files if f.startswith(f'scalar_{identifier}')], reverse=True)
-        scaler_file = os.path.join(path, scaler_files[0])
-        loaded_scaler = joblib.load(scaler_file)
+        loaded_scaler = _load_latest_scaler(path, identifier)
         sequences_scaled = loaded_scaler.transform(sequences_reshaped)
     else:
         sequences_scaled = scaler.fit_transform(sequences_reshaped)
-        joblib.dump(scaler, os.path.join(path, f'scalar_{identifier}.pkl'))
+        datetime_str = datetime.now().strftime("%Y%m%d_%H%M%S")
+        filename = f"scalar_{identifier}_{datetime_str}.pkl"
+
+        scaler_file = os.path.join(path, filename)
+        joblib.dump(scaler, scaler_file)
+        path_abs = os.path.abspath(path)
+        _SCALER_CACHE[(path_abs, identifier)] = (os.stat(path_abs).st_mtime_ns, scaler_file, scaler)
     return sequences_scaled.reshape(sequences.shape)
 
 
@@ -1152,17 +1238,23 @@ def inverse_scale(sequences_scaled: np.ndarray, path: str, is_label: bool = Fals
     else:
         identifier = 'virtual' if is_inverse else 'q_loss'
 
-    # Find the relevant scaler file
-    scaler_files = os.listdir(path)
-    scaler_file = os.path.join(path,
-                               sorted([f for f in scaler_files if f.startswith(f'scalar_{identifier}')], reverse=True)[
-                                   0])
-
     # Load the scaler and inversely transform the sequences
-    loaded_scaler = joblib.load(scaler_file)
+    loaded_scaler = _load_latest_scaler(path, identifier)
     inverse_value = loaded_scaler.inverse_transform(sequences_scaled)
 
     return inverse_value.reshape(-1)[0]
+
+
+def inverse_scale_values(sequences_scaled: np.ndarray, path: str, is_label: bool = False,
+                         is_inverse: bool = False) -> np.ndarray:
+    """Inverse-scale an array and return all values instead of only the first."""
+    if is_label:
+        identifier = 'labels_inverse' if is_inverse else 'labels'
+    else:
+        identifier = 'virtual' if is_inverse else 'q_loss'
+
+    loaded_scaler = _load_latest_scaler(path, identifier)
+    return loaded_scaler.inverse_transform(sequences_scaled).reshape(-1)
 
 
 def create_inverse_df(inputs: np.ndarray, labels: np.ndarray, degradation_type: str, is_inverse: bool = False) \
@@ -1215,24 +1307,26 @@ def load_tf_model_from_zip(zip_path, delete_after_load=True, custom_objects=None
     Returns:
     - The loaded TensorFlow model.
     """
-    # Create a temporary directory to extract the ZIP file
-    extract_dir = tempfile.mkdtemp()
+    with _TF_MODEL_LOAD_LOCK:
+        # Create a temporary directory to extract the ZIP file
+        extract_dir = tempfile.mkdtemp()
 
-    # Extract the ZIP file
-    with zipfile.ZipFile(zip_path, 'r') as zip_ref:
-        zip_ref.extractall(extract_dir)
-    print(f"Extracted model to temporary directory: {extract_dir}")
+        try:
+            # Extract the ZIP file
+            with zipfile.ZipFile(zip_path, 'r') as zip_ref:
+                zip_ref.extractall(extract_dir)
+            print(f"Extracted model to temporary directory: {extract_dir}")
 
-    # Assuming there's only one directory in the ZIP file, and the model is inside it
-    model_dir = extract_dir
-    print(f"Model directory: {model_dir}")
-    model = tf.keras.models.load_model(model_dir, custom_objects=custom_objects)
-    print(f"Model loaded from: {model_dir}")
-
-    # Optionally, delete the extracted directory after loading the model
-    if delete_after_load:
-        shutil.rmtree(extract_dir)
-        print(f"Temporary directory deleted: {extract_dir}")
+            # Assuming there's only one directory in the ZIP file, and the model is inside it
+            model_dir = extract_dir
+            print(f"Model directory: {model_dir}")
+            model = tf.keras.models.load_model(model_dir, custom_objects=custom_objects)
+            print(f"Model loaded from: {model_dir}")
+        finally:
+            # Optionally, delete the extracted directory after loading the model
+            if delete_after_load:
+                shutil.rmtree(extract_dir, ignore_errors=True)
+                print(f"Temporary directory deleted: {extract_dir}")
 
     return model
 
