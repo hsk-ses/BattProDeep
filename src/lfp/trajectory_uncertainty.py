@@ -426,6 +426,20 @@ def calculate_soc_with_current_losses_vectorized_crate_limit(
     return soc, current_rated
 
 
+def _rate_limited_current(
+    current_series: pd.Series,
+    C_nominal: float,
+    soh: np.ndarray,
+    C_rate_max: float = 1.0,
+    scale: float = 1.0,
+) -> np.ndarray:
+    """Particle currents (M, n_steps) with the same scaling and SoH-dependent C-rate limit as the SOC calculation."""
+    current = current_series.to_numpy(dtype=np.float32)
+    eff_cap = np.maximum(C_nominal * np.asarray(soh, dtype=np.float32), 1e-9)
+    i_max = eff_cap * C_rate_max
+    return np.clip(current[None, :] * scale, -i_max[:, None], i_max[:, None]).astype(np.float32)
+
+
 def sample_uncertainty_particles(
     M: int,
     n_boot: int = 32,
@@ -771,9 +785,22 @@ def run_variant_timebased_vectorized(
 
     with tqdm(total=len(blocks), desc=f"{name} | FEC blocks", leave=False) as pbar_blocks:
         for block_idx, block in enumerate(blocks, start=1):
+            # Optional "Current_soc" column: current used ONLY for the coulomb-counted SOC (and thus the
+            # SOC-based FEC count), e.g. the average cell current. Cells and modules in parallel share the
+            # terminal voltage and hence the SOC, so a bounding scenario current (I_avg * (1 +/- r/2)) must
+            # not be integrated into its own SOC. The C-rate features keep using "Current". Without the
+            # column, or with Current_soc=None (all values missing), the behaviour is unchanged (SOC and
+            # C-rates both from "Current").
+            use_soc_current = "Current_soc" in block.columns and block["Current_soc"].notna().any()
+            if use_soc_current and block["Current_soc"].isna().any():
+                raise ValueError(
+                    f"'Current_soc' has {int(block['Current_soc'].isna().sum())} missing values in block "
+                    f"{block_idx}; fill them or pass Current_soc=None to use 'Current' for the SOC."
+                )
+            soc_current = block["Current_soc"] if use_soc_current else block["Current"]
             soc_particles, i_actual = calculate_soc_with_current_losses_vectorized_crate_limit(
                 M=M,
-                current_series=block["Current"],
+                current_series=soc_current,
                 initial_soc=soc_init,
                 C_nominal=C_nominal,
                 soh=soh_particles,
@@ -782,6 +809,11 @@ def run_variant_timebased_vectorized(
                 C_rate_max=C_rate_max,
                 scale=scale,
             )
+            if use_soc_current:
+                i_actual = _rate_limited_current(
+                    block["Current"], C_nominal=C_nominal, soh=soh_particles,
+                    C_rate_max=C_rate_max, scale=scale,
+                )
 
             (
                 delta_fec_particles,
